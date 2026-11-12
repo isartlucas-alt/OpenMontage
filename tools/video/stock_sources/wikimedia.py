@@ -82,13 +82,7 @@ class WikimediaSource:
                 "inprop": "url",
             }
 
-            r = requests.get(
-                _API_URL,
-                params=params,
-                headers={"User-Agent": _USER_AGENT},
-                timeout=30,
-            )
-            r.raise_for_status()
+            r = _get_with_backoff(requests, _API_URL, params=params, timeout=30)
             data = r.json()
             pages = list(((data.get("query") or {}).get("pages") or {}).values())
             if not pages:
@@ -114,18 +108,58 @@ class WikimediaSource:
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with requests.get(
-            candidate.download_url,
-            stream=True,
-            timeout=300,
-            headers={"User-Agent": _USER_AGENT},
-        ) as r:
-            r.raise_for_status()
+        # Commons throttles hot-linked originals (HTTP 429) and asks bots
+        # to fetch standard thumbnail sizes instead. For large stills,
+        # a 1920px thumbnail is plenty for a 1080p frame.
+        url = candidate.download_url
+        if candidate.kind == "image" and candidate.width > _THUMB_WIDTH:
+            url = _thumbnail_url(url, _THUMB_WIDTH) or url
+
+        r = _get_with_backoff(requests, url, stream=True, timeout=300)
+        with r:
             with open(out_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1 << 16):
                     if chunk:
                         f.write(chunk)
         return out_path
+
+
+_THUMB_WIDTH = 1920
+
+
+def _thumbnail_url(original_url: str, width: int) -> str | None:
+    """Map an upload.wikimedia.org original URL to its standard thumbnail.
+
+    ``.../commons/b/b0/Name.jpg`` -> ``.../commons/thumb/b/b0/Name.jpg/1920px-Name.jpg``.
+    Only raster formats that Commons thumbnails as-is (JPEG/PNG) are mapped.
+    """
+    base = original_url.split("?", 1)[0]
+    marker = "/wikipedia/commons/"
+    if marker not in base or "/thumb/" in base:
+        return None
+    head, tail = base.split(marker, 1)
+    filename = tail.rsplit("/", 1)[-1]
+    if not filename.lower().endswith((".jpg", ".jpeg", ".png")):
+        return None
+    return f"{head}{marker}thumb/{tail}/{width}px-{filename}"
+
+
+def _get_with_backoff(requests_mod, url: str, *, retries: int = 4, **kwargs):
+    """GET with exponential backoff on HTTP 429 (Commons rate limiting)."""
+    import time
+
+    headers = {"User-Agent": _USER_AGENT, **kwargs.pop("headers", {})}
+    delay = 2.0
+    for attempt in range(retries + 1):
+        r = requests_mod.get(url, headers=headers, **kwargs)
+        if r.status_code != 429 or attempt == retries:
+            r.raise_for_status()
+            return r
+        r.close()
+        retry_after = r.headers.get("Retry-After", "")
+        time.sleep(float(retry_after) if retry_after.isdigit() else delay)
+        delay *= 2
+    raise RuntimeError("unreachable")
 
 
 def _build_search_queries(query: str, kind: str) -> list[tuple[str, str]]:
