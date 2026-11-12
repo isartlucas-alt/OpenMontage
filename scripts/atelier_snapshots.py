@@ -46,6 +46,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--public-dir", help="public dir (default projects/<slug>/public)")
     ap.add_argument("--fps", type=int, default=None, help="frames per second (default from props or 30)")
     ap.add_argument("--only", nargs="*", help="only these scene ids")
+    ap.add_argument("--browser-executable",
+                    help="absolute path to a Chrome/Chromium binary for Remotion "
+                         "(use on machines where Remotion cannot download its own)")
     args = ap.parse_args(argv)
 
     proj = REPO_ROOT / "projects" / args.slug
@@ -102,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
             f"--props={props_path.resolve()}",
             f"--public-dir={public_dir.resolve()}",
         ]
+        if args.browser_executable:
+            cmd.append(f"--browser-executable={args.browser_executable}")
         try:
             subprocess.run(cmd, cwd=COMPOSER_DIR, check=True, capture_output=True, text=True, timeout=600)
             ok += 1
